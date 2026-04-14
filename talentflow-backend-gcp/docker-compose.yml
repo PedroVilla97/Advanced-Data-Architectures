@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  parser-agent:
+    build:
+      context: ./parser-agent
+    ports:
+      - "8001:8080"
+
+  reputation-service:
+    build:
+      context: ./reputation-service
+    ports:
+      - "8002:8080"
+
+  contract-service:
+    build:
+      context: ./contract-service
+    environment:
+      REPUTATION_SERVICE_URL: http://reputation-service:8080
+      MILESTONE_HANDLER_URL: ${MILESTONE_HANDLER_URL:-}
+      ALLOW_ORIGINS: ${ALLOW_ORIGINS:-*}
+    ports:
+      - "8003:8080"
+    depends_on:
+      - reputation-service
+
+  matching-orchestrator:
+    build:
+      context: ./matching-orchestrator
+    environment:
+      PARSER_AGENT_URL: http://parser-agent:8080
+      REPUTATION_SERVICE_URL: http://reputation-service:8080
+      ALLOW_ORIGINS: ${ALLOW_ORIGINS:-*}
+    ports:
+      - "8000:8080"
+    depends_on:
+      - parser-agent
+      - reputation-service
