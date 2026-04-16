@@ -2,8 +2,19 @@ import os
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Matching Orchestrator")
+
+#### Checking for running frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+########
 
 PARSER_AGENT_URL = os.getenv("PARSER_AGENT_URL", "http://parser-agent:8080")
 REPUTATION_SERVICE_URL = os.getenv("REPUTATION_SERVICE_URL", "http://reputation-service:8080")

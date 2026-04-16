@@ -37,3 +37,10 @@ services:
     depends_on:
       - parser-agent
       - reputation-service
+
+  frontend:
+    image: nginx:alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend/:/usr/share/nginx/html/
