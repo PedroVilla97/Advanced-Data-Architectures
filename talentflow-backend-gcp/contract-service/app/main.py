@@ -1,89 +1,184 @@
-import httpx
+import json
+import os
+from typing import List
+
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-
-from app.config import MILESTONE_HANDLER_URL, ALLOW_ORIGINS
-from app.schemas import ContractCreateRequest, MilestoneCompleteRequest, MilestoneCompletionEvent
-from app.store import CONTRACTS
-
-app = FastAPI(title="TalentFlow Contract Service", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS if ALLOW_ORIGINS != ["*"] else ["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from pydantic import BaseModel
+from google.cloud import pubsub_v1
 
 
+app = FastAPI(title="Contract Service")
+
+
+# -----------------------------
+# Google Cloud Pub/Sub settings
+# -----------------------------
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
+MILESTONE_TOPIC = os.getenv("MILESTONE_TOPIC", "milestone-completed")
+
+
+# -----------------------------
+# Data models
+# -----------------------------
+class Milestone(BaseModel):
+    milestone_id: str
+    title: str
+    amount: float
+    status: str = "pending"
+
+
+class ContractCreateRequest(BaseModel):
+    contract_id: str
+    job_id: str
+    freelancer_id: str
+    freelancer_name: str
+    terms: str
+    milestones: List[Milestone]
+
+
+class MilestoneCompleteRequest(BaseModel):
+    contract_id: str
+    milestone_id: str
+
+
+# -----------------------------
+# In-memory contract store
+# Later this can be replaced by Cloud SQL
+# -----------------------------
+CONTRACTS = {}
+
+
+# -----------------------------
+# Pub/Sub helper
+# -----------------------------
+def publish_milestone_completed(event: dict) -> str:
+    """
+    Publishes a MilestoneCompleted event to Google Cloud Pub/Sub.
+
+    This supports the choreography/event-driven part of the architecture:
+    contract-service -> Pub/Sub -> milestone-handler function.
+    """
+
+    if not PROJECT_ID:
+        raise RuntimeError(
+            "GOOGLE_CLOUD_PROJECT environment variable is missing. "
+            "Set it when deploying contract-service."
+        )
+
+    publisher = pubsub_v1.PublisherClient()
+    topic_path = publisher.topic_path(PROJECT_ID, MILESTONE_TOPIC)
+
+    data = json.dumps(event).encode("utf-8")
+
+    future = publisher.publish(
+        topic_path,
+        data,
+        event_type="MilestoneCompleted",
+    )
+
+    message_id = future.result()
+    return message_id
+
+
+# -----------------------------
+# Health endpoint
+# -----------------------------
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok", "service": "contract-service"}
+def health():
+    return {
+        "status": "ok",
+        "service": "contract-service",
+        "pubsub_topic": MILESTONE_TOPIC,
+        "project_id_configured": PROJECT_ID is not None,
+    }
 
 
+# -----------------------------
+# Contract endpoints
+# -----------------------------
 @app.get("/contracts")
-def list_contracts() -> list[dict]:
+def list_contracts():
     return list(CONTRACTS.values())
 
 
 @app.get("/contracts/{contract_id}")
-def get_contract(contract_id: str) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if not contract:
+def get_contract(contract_id: str):
+    if contract_id not in CONTRACTS:
         raise HTTPException(status_code=404, detail="Contract not found")
-    return contract
+
+    return CONTRACTS[contract_id]
 
 
 @app.post("/contracts")
-def create_contract(payload: ContractCreateRequest) -> dict:
+def create_contract(payload: ContractCreateRequest):
     if payload.contract_id in CONTRACTS:
         raise HTTPException(status_code=409, detail="Contract already exists")
+
     contract = payload.model_dump()
     contract["status"] = "active"
+
     CONTRACTS[payload.contract_id] = contract
+
     return contract
 
 
+# -----------------------------
+# Milestone endpoint with Pub/Sub event publishing
+# -----------------------------
 @app.post("/milestones/complete")
-async def complete_milestone(payload: MilestoneCompleteRequest) -> dict:
-    contract = CONTRACTS.get(payload.contract_id)
-    if not contract:
+def complete_milestone(payload: MilestoneCompleteRequest):
+    if payload.contract_id not in CONTRACTS:
         raise HTTPException(status_code=404, detail="Contract not found")
 
-    selected = None
+    contract = CONTRACTS[payload.contract_id]
+
+    completed_milestone = None
+
     for milestone in contract["milestones"]:
         if milestone["milestone_id"] == payload.milestone_id:
-            selected = milestone
+            if milestone["status"] == "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Milestone already completed",
+                )
+
+            milestone["status"] = "completed"
+            completed_milestone = milestone
             break
 
-    if not selected:
+    if completed_milestone is None:
         raise HTTPException(status_code=404, detail="Milestone not found")
 
-    if selected["status"] == "completed":
-        raise HTTPException(status_code=409, detail="Milestone already completed")
+    all_completed = all(
+        milestone["status"] == "completed"
+        for milestone in contract["milestones"]
+    )
 
-    selected["status"] = "completed"
+    if all_completed:
+        contract["status"] = "completed"
 
-    event = MilestoneCompletionEvent(
-        contract_id=payload.contract_id,
-        milestone_id=payload.milestone_id,
-        freelancer_id=contract["freelancer_id"],
-        amount=selected["amount"],
-    ).model_dump()
+    CONTRACTS[payload.contract_id] = contract
 
-    function_result = None
-    if MILESTONE_HANDLER_URL:
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                response = await client.post(MILESTONE_HANDLER_URL, json=event)
-                response.raise_for_status()
-                function_result = response.json()
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Milestone handler failed: {exc}")
+    event = {
+        "event_type": "MilestoneCompleted",
+        "contract_id": payload.contract_id,
+        "milestone_id": payload.milestone_id,
+        "freelancer_id": contract["freelancer_id"],
+        "freelancer_name": contract["freelancer_name"],
+        "amount": completed_milestone["amount"],
+    }
+
+    try:
+        message_id = publish_milestone_completed(event)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Milestone was completed but Pub/Sub event failed: {str(exc)}",
+        )
 
     return {
-        "message": "Milestone completed",
+        "message": "Milestone completed and event published",
+        "contract": contract,
+        "pubsub_message_id": message_id,
         "event": event,
-        "function_result": function_result,
     }
