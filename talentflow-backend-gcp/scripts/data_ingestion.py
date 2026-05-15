@@ -1,9 +1,13 @@
 import csv
 import random
+import os
+import sys
 import httpx
 
-#Reputation-service on port 8002 from docker-compose.yml
-reputation_service_url = "http://localhost:8002"
+reputation_service_url = os.getenv(
+    "REPUTATION_SERVICE_URL",
+    "http://localhost:8002"
+).rstrip("/")
 
 
 #known skills to match on
@@ -127,5 +131,12 @@ def seed_backend(freelancers):
     return
 
 if __name__ == "__main__":
-    freelancers = load_freelancers_data("data/resume_dataset_1200.csv")
+    filepath = sys.argv[1] if len(sys.argv) > 1 else "data/resume_dataset_1200.csv"
+
+    print(f"Loading freelancers from: {filepath}")
+    print(f"Seeding backend at: {reputation_service_url}")
+
+    freelancers = load_freelancers_data(filepath)
+    print(f"Prepared {len(freelancers)} freelancer profiles")
+
     seed_backend(freelancers)
