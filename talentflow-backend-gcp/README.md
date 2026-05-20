@@ -1,6 +1,6 @@
-# TalentFlow Backend - Google Cloud Deployment
+# Instructions to deploy the code to google cloud
 
-This README contains the simple commands needed to deploy and test the TalentFlow backend on Google Cloud.
+This README contains the simple commands needed to deploy and test the TalentFlow backend on Google Cloud. Aswell calls to the endpoints are written
 
 The implementation includes:
 
@@ -10,17 +10,7 @@ The implementation includes:
 - `contract-service` - Cloud Run REST service publishing Pub/Sub events
 - `milestone-handler` - Cloud Function Gen 2 triggered by Pub/Sub
 
----
-
-## 1. Go to the project folder
-
-```bash
-cd ~/Documents/JADS/ada/talentflow-backend-gcp
-```
-
----
-
-## 2. Set variables
+## 1. Set variables
 
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
@@ -35,9 +25,7 @@ echo $PROJECT_ID
 echo $REGION
 ```
 
----
-
-## 3. Enable Google Cloud services
+## 2. Enable Google Cloud services
 
 ```bash
 gcloud services enable \
@@ -51,9 +39,7 @@ gcloud services enable \
   logging.googleapis.com
 ```
 
----
-
-## 4. Create Firestore database
+## 3. Create Firestore database
 
 ```bash
 gcloud firestore databases create \
@@ -63,11 +49,7 @@ gcloud firestore databases create \
   --type=firestore-native
 ```
 
-If it says the database already exists, ignore the error.
-
----
-
-## 5. Deploy parser-agent
+## 4. Deploy parser-agent
 
 ```bash
 gcloud run deploy parser-agent \
@@ -90,7 +72,7 @@ curl $PARSER_AGENT_URL/health
 
 ---
 
-## 6. Deploy reputation-service
+## 5. Deploy reputation-service
 
 ```bash
 gcloud run deploy reputation-service \
@@ -112,9 +94,7 @@ Test:
 curl $REPUTATION_SERVICE_URL/health
 ```
 
----
-
-## 7. Deploy matching-orchestrator
+## 6. Deploy matching-orchestrator
 
 ```bash
 gcloud run deploy matching-orchestrator \
@@ -136,9 +116,7 @@ Test:
 curl $MATCHING_ORCHESTRATOR_URL/health
 ```
 
----
-
-## 8. Create Pub/Sub topic
+## 7. Create Pub/Sub topic
 
 ```bash
 gcloud pubsub topics create $MILESTONE_TOPIC
@@ -153,9 +131,7 @@ gcloud pubsub subscriptions create milestone-debug-sub \
   --topic=$MILESTONE_TOPIC
 ```
 
----
-
-## 9. Deploy contract-service
+## 8. Deploy contract-service
 
 ```bash
 gcloud run deploy contract-service \
@@ -177,9 +153,7 @@ Test:
 curl $CONTRACT_SERVICE_URL/health
 ```
 
----
-
-## 10. Deploy milestone-handler Cloud Function
+## 9. Deploy milestone-handler Cloud Function
 
 ```bash
 gcloud functions deploy milestone-handler \
@@ -192,9 +166,7 @@ gcloud functions deploy milestone-handler \
   --set-env-vars REPUTATION_SERVICE_URL=$REPUTATION_SERVICE_URL
 ```
 
----
-
-## 11. Run data ingestion
+## 10. Run data ingestion
 
 Make sure your CSV file exists at:
 
@@ -214,9 +186,7 @@ Check profiles:
 curl $REPUTATION_SERVICE_URL/profiles
 ```
 
----
-
-## 12. Test the matching workflow
+## 11. Test the matching workflow
 
 ```bash
 curl -X POST $MATCHING_ORCHESTRATOR_URL/match \
@@ -227,9 +197,7 @@ curl -X POST $MATCHING_ORCHESTRATOR_URL/match \
   }'
 ```
 
----
-
-## 13. Test contract creation
+## 12. Test contract creation
 
 ```bash
 curl -X POST $CONTRACT_SERVICE_URL/contracts \
@@ -257,9 +225,7 @@ Check contract:
 curl $CONTRACT_SERVICE_URL/contracts/c-demo-1
 ```
 
----
-
-## 14. Test milestone completion and Pub/Sub event
+## 13. Test milestone completion and Pub/Sub event
 
 ```bash
 curl -X POST $CONTRACT_SERVICE_URL/milestones/complete \
@@ -282,9 +248,7 @@ Expected result:
 }
 ```
 
----
-
-## 15. Check milestone-handler logs
+## 14. Check milestone-handler logs
 
 ```bash
 gcloud functions logs read milestone-handler \
@@ -293,17 +257,13 @@ gcloud functions logs read milestone-handler \
   --limit 20
 ```
 
----
-
-## 16. Check reputation update
+## 15. Check reputation update
 
 ```bash
 curl $REPUTATION_SERVICE_URL/profiles/f1
 ```
 
 The reputation score should increase after the milestone event is processed.
-
----
 
 # Useful health checks
 
@@ -313,92 +273,3 @@ curl $REPUTATION_SERVICE_URL/health
 curl $MATCHING_ORCHESTRATOR_URL/health
 curl $CONTRACT_SERVICE_URL/health
 ```
-
----
-
-# Useful Google Cloud commands
-
-List Cloud Run services:
-
-```bash
-gcloud run services list --region $REGION
-```
-
-List Cloud Functions:
-
-```bash
-gcloud functions list --gen2 --region $REGION
-```
-
-List Pub/Sub topics:
-
-```bash
-gcloud pubsub topics list
-```
-
-Read Cloud Run logs:
-
-```bash
-gcloud run services logs read matching-orchestrator --region $REGION --limit 50
-gcloud run services logs read contract-service --region $REGION --limit 50
-```
-
-Read Cloud Function logs:
-
-```bash
-gcloud functions logs read milestone-handler --gen2 --region $REGION --limit 50
-```
-
----
-
-# Reduce Google Cloud resource usage
-
-Cloud Run normally scales to zero automatically. Run this to make sure all services have zero minimum instances:
-
-```bash
-for SERVICE in parser-agent reputation-service matching-orchestrator contract-service; do
-  gcloud run services update $SERVICE \
-    --region $REGION \
-    --min-instances=0
-done
-```
-
----
-
-# Delete deployed resources
-
-Use this only if you want to remove the implementation from Google Cloud.
-
-```bash
-gcloud run services delete parser-agent --region $REGION
-gcloud run services delete reputation-service --region $REGION
-gcloud run services delete matching-orchestrator --region $REGION
-gcloud run services delete contract-service --region $REGION
-```
-
-```bash
-gcloud functions delete milestone-handler \
-  --gen2 \
-  --region $REGION
-```
-
-```bash
-gcloud pubsub subscriptions delete milestone-debug-sub
-gcloud pubsub topics delete $MILESTONE_TOPIC
-```
-
-Do not delete Firestore unless you are sure you no longer need the ingested freelancer data.
-
----
-
-# Implementation summary
-
-This deployment demonstrates:
-
-- RESTful microservices using Cloud Run
-- FaaS using Cloud Functions Gen 2
-- Firestore persistence for freelancer profiles and reputation scores
-- Pub/Sub event-driven communication
-- Orchestration through the matching orchestrator
-- Choreography through milestone completion events
-- End-to-end workflow from job matching to contract milestone completion and reputation update
