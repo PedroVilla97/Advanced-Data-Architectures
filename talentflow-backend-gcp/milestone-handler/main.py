@@ -14,8 +14,6 @@ def decode_pubsub_event(cloud_event) -> Dict[str, Any]:
     """
     Decode a Pub/Sub CloudEvent into a Python dictionary.
 
-    Pub/Sub sends the message body as base64 inside:
-    cloud_event.data["message"]["data"]
     """
 
     message = cloud_event.data.get("message", {})
@@ -30,10 +28,8 @@ def decode_pubsub_event(cloud_event) -> Dict[str, Any]:
 
 def release_payment(event: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Simulated payment release.
+    Simulated payment 
 
-    In the target architecture this would call Stripe or another payment provider.
-    For the MVP, we only simulate the outcome.
     """
 
     return {
