@@ -1,196 +1,404 @@
-# TalentFlow backend package for Google Cloud
+# TalentFlow Backend - Google Cloud Deployment
 
-This package includes a deployable MVP backend for **TalentFlow** with:
+This README contains the simple commands needed to deploy and test the TalentFlow backend on Google Cloud.
 
-- **4 HTTP microservices/agents** deployed as containers on **Cloud Run**
-- **1 Gen 2 Cloud Function** for milestone handling
-- a local `docker-compose.yml` for development
-- shell scripts for local startup and Google Cloud deployment
+The implementation includes:
 
-## Services
+- `parser-agent` - Cloud Run REST service
+- `reputation-service` - Cloud Run REST service using Firestore
+- `matching-orchestrator` - Cloud Run REST service
+- `contract-service` - Cloud Run REST service publishing Pub/Sub events
+- `milestone-handler` - Cloud Function Gen 2 triggered by Pub/Sub
 
-1. **matching-orchestrator**
-   - orchestrates matching
-   - calls parser-agent and reputation-service
-   - stores shortlists in memory
+---
 
-2. **parser-agent**
-   - parses free-text job descriptions
-   - exposes skill and budget extraction endpoints
-
-3. **reputation-service**
-   - owns freelancer profiles and reputation scores
-   - in-memory store for MVP, easy to replace with Firestore later
-
-4. **contract-service**
-   - owns contracts and milestones
-   - calls milestone-handler after milestone completion
-
-5. **milestone-handler-function**
-   - HTTP-triggered Cloud Function (Gen 2)
-   - simulates payment release and updates freelancer reputation
-
-## Why this fits your course requirements
-
-- **At least 4 internal services/agents**: parser-agent, matching-orchestrator, reputation-service, contract-service
-- **Mix of REST and FaaS**: Cloud Run services + Gen 2 Cloud Function
-- **12+ operations**:
-  - matching-orchestrator: `health`, `submit_job`, `get_shortlist`
-  - parser-agent: `health`, `parse_job`, `extract_skills`, `extract_budget`
-  - reputation-service: `health`, `list_profiles`, `get_profile`, `create_profile`, `update_score`
-  - contract-service: `health`, `list_contracts`, `get_contract`, `create_contract`, `complete_milestone`
-  - milestone-handler-function: `handle_milestone_completion`
-- **Composition**:
-  - orchestration: matching-orchestrator → parser-agent + reputation-service
-  - service-to-function composition: contract-service → milestone-handler-function
-
-## Assumptions
-
-- This package is an **MVP** for demonstration.
-- It uses **in-memory storage** so it runs immediately without provisioning databases.
-- The storage layer can later be replaced with:
-  - Firestore for profiles
-  - Cloud SQL for contracts
-  - Pub/Sub or Eventarc for milestone events
-- Authentication is not enforced in this MVP.
-- CORS is open to simplify frontend integration during development.
-
-## Architecture
-
-```text
-Frontend
-   |
-   v
-matching-orchestrator  --->  parser-agent
-   |
-   +------------------->  reputation-service
-   |
-   v
-contract-service  --->  milestone-handler-function  ---> reputation-service
-```
-
-## Local development
-
-### 1) Start all Cloud Run services locally
+## 1. Go to the project folder
 
 ```bash
-docker compose up --build
+cd ~/Documents/JADS/ada/talentflow-backend-gcp
 ```
 
-Services:
-- matching-orchestrator: `http://localhost:8000`
-- parser-agent: `http://localhost:8001`
-- reputation-service: `http://localhost:8002`
-- contract-service: `http://localhost:8003`
+---
 
-### 2) Start the function locally in another terminal
+## 2. Set variables
 
 ```bash
-cd milestone-handler-function
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-functions-framework --target=handle_milestone_completion --debug --port=8084
+export PROJECT_ID=$(gcloud config get-value project)
+export REGION=europe-west1
+export MILESTONE_TOPIC=milestone-completed
 ```
 
-Then set:
+Check:
 
 ```bash
-export MILESTONE_HANDLER_URL=http://localhost:8084
+echo $PROJECT_ID
+echo $REGION
 ```
 
-If you use `docker compose`, contract-service already exposes the env var placeholder. Replace it in `.env` or the compose file for local function testing.
+---
 
-## Quick tests
-
-### Health checks
+## 3. Enable Google Cloud services
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8001/health
-curl http://localhost:8002/health
-curl http://localhost:8003/health
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  firestore.googleapis.com \
+  pubsub.googleapis.com \
+  cloudfunctions.googleapis.com \
+  eventarc.googleapis.com \
+  logging.googleapis.com
 ```
 
-### Match request
+---
+
+## 4. Create Firestore database
 
 ```bash
-curl -X POST http://localhost:8000/jobs \
+gcloud firestore databases create \
+  --database="(default)" \
+  --location=$REGION \
+  --edition=standard \
+  --type=firestore-native
+```
+
+If it says the database already exists, ignore the error.
+
+---
+
+## 5. Deploy parser-agent
+
+```bash
+gcloud run deploy parser-agent \
+  --source ./parser-agent \
+  --region $REGION \
+  --allow-unauthenticated
+```
+
+```bash
+export PARSER_AGENT_URL=$(gcloud run services describe parser-agent \
+  --region $REGION \
+  --format='value(status.url)')
+```
+
+Test:
+
+```bash
+curl $PARSER_AGENT_URL/health
+```
+
+---
+
+## 6. Deploy reputation-service
+
+```bash
+gcloud run deploy reputation-service \
+  --source ./reputation-service \
+  --region $REGION \
+  --allow-unauthenticated \
+  --set-env-vars GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FREELANCER_COLLECTION=freelancer_profiles
+```
+
+```bash
+export REPUTATION_SERVICE_URL=$(gcloud run services describe reputation-service \
+  --region $REGION \
+  --format='value(status.url)')
+```
+
+Test:
+
+```bash
+curl $REPUTATION_SERVICE_URL/health
+```
+
+---
+
+## 7. Deploy matching-orchestrator
+
+```bash
+gcloud run deploy matching-orchestrator \
+  --source ./matching-orchestrator \
+  --region $REGION \
+  --allow-unauthenticated \
+  --set-env-vars PARSER_AGENT_URL=$PARSER_AGENT_URL,REPUTATION_SERVICE_URL=$REPUTATION_SERVICE_URL
+```
+
+```bash
+export MATCHING_ORCHESTRATOR_URL=$(gcloud run services describe matching-orchestrator \
+  --region $REGION \
+  --format='value(status.url)')
+```
+
+Test:
+
+```bash
+curl $MATCHING_ORCHESTRATOR_URL/health
+```
+
+---
+
+## 8. Create Pub/Sub topic
+
+```bash
+gcloud pubsub topics create $MILESTONE_TOPIC
+```
+
+If it says the topic already exists, ignore the error.
+
+Optional debug subscription:
+
+```bash
+gcloud pubsub subscriptions create milestone-debug-sub \
+  --topic=$MILESTONE_TOPIC
+```
+
+---
+
+## 9. Deploy contract-service
+
+```bash
+gcloud run deploy contract-service \
+  --source ./contract-service \
+  --region $REGION \
+  --allow-unauthenticated \
+  --set-env-vars GOOGLE_CLOUD_PROJECT=$PROJECT_ID,MILESTONE_TOPIC=$MILESTONE_TOPIC
+```
+
+```bash
+export CONTRACT_SERVICE_URL=$(gcloud run services describe contract-service \
+  --region $REGION \
+  --format='value(status.url)')
+```
+
+Test:
+
+```bash
+curl $CONTRACT_SERVICE_URL/health
+```
+
+---
+
+## 10. Deploy milestone-handler Cloud Function
+
+```bash
+gcloud functions deploy milestone-handler \
+  --gen2 \
+  --runtime python311 \
+  --region $REGION \
+  --source ./milestone-handler \
+  --entry-point milestone_handler \
+  --trigger-topic $MILESTONE_TOPIC \
+  --set-env-vars REPUTATION_SERVICE_URL=$REPUTATION_SERVICE_URL
+```
+
+---
+
+## 11. Run data ingestion
+
+Make sure your CSV file exists at:
+
+```bash
+data/resume_dataset_1200.csv
+```
+
+Then run:
+
+```bash
+REPUTATION_SERVICE_URL=$REPUTATION_SERVICE_URL python data_ingestion.py
+```
+
+Check profiles:
+
+```bash
+curl $REPUTATION_SERVICE_URL/profiles
+```
+
+---
+
+## 12. Test the matching workflow
+
+```bash
+curl -X POST $MATCHING_ORCHESTRATOR_URL/match \
   -H "Content-Type: application/json" \
   -d '{
-    "description": "Need a React and Firebase developer for a dashboard MVP with Docker knowledge and budget 45",
-    "top_k": 3
+    "description": "We need a Python and SQL freelancer for a data analytics project with a budget of 55",
+    "top_k": 5
   }'
 ```
 
-### Create contract
+---
+
+## 13. Test contract creation
 
 ```bash
-curl -X POST http://localhost:8003/contracts \
+curl -X POST $CONTRACT_SERVICE_URL/contracts \
   -H "Content-Type: application/json" \
   -d '{
-    "contract_id": "c1",
-    "job_id": "j1",
-    "freelancer_id": "f2",
-    "freelancer_name": "Bruno Silva",
-    "terms": "Payment is released after each completed milestone.",
+    "contract_id": "c-demo-1",
+    "job_id": "j-demo-1",
+    "freelancer_id": "f1",
+    "freelancer_name": "Test Freelancer",
+    "terms": "Payment released after milestone completion.",
     "milestones": [
-      {"milestone_id": "m1", "title": "UI prototype", "amount": 300, "status": "pending"},
-      {"milestone_id": "m2", "title": "Final dashboard", "amount": 500, "status": "pending"}
+      {
+        "milestone_id": "m1",
+        "title": "First delivery",
+        "amount": 300,
+        "status": "pending"
+      }
     ]
   }'
 ```
 
-### Complete milestone
+Check contract:
 
 ```bash
-curl -X POST http://localhost:8003/milestones/complete \
+curl $CONTRACT_SERVICE_URL/contracts/c-demo-1
+```
+
+---
+
+## 14. Test milestone completion and Pub/Sub event
+
+```bash
+curl -X POST $CONTRACT_SERVICE_URL/milestones/complete \
   -H "Content-Type: application/json" \
   -d '{
-    "contract_id": "c1",
+    "contract_id": "c-demo-1",
     "milestone_id": "m1"
   }'
 ```
 
-## Deploy to Google Cloud
+Expected result:
 
-### Prerequisites
-
-Install and initialize the Google Cloud CLI, choose a project, and enable the required APIs.
-
-```bash
-gcloud init
-gcloud config set project YOUR_PROJECT_ID
-gcloud services enable artifactregistry.googleapis.com cloudbuild.googleapis.com run.googleapis.com logging.googleapis.com cloudfunctions.googleapis.com
+```json
+{
+  "message": "Milestone completed and event published",
+  "pubsub_message_id": "...",
+  "event": {
+    "event_type": "MilestoneCompleted"
+  }
+}
 ```
 
-### Deploy order
+---
 
-Deploy in this order so service URLs can be injected into dependent services:
-
-1. `parser-agent`
-2. `reputation-service`
-3. `milestone-handler-function`
-4. `contract-service`
-5. `matching-orchestrator`
-
-### One-command deploy
+## 15. Check milestone-handler logs
 
 ```bash
-chmod +x scripts/deploy_gcp.sh
-./scripts/deploy_gcp.sh YOUR_PROJECT_ID europe-west1
+gcloud functions logs read milestone-handler \
+  --gen2 \
+  --region $REGION \
+  --limit 20
 ```
 
-The script:
-- deploys each Cloud Run service from source
-- deploys the milestone Cloud Function Gen 2
-- injects dependent service URLs as environment variables
-- prints final service URLs
+---
 
-## Recommended next replacements
+## 16. Check reputation update
 
-- replace reputation-service memory store with Firestore
-- replace contract-service memory store with Cloud SQL
-- replace direct function HTTP call with Pub/Sub + Eventarc
-- add Firebase Auth token verification middleware
-- add dataset ingestion jobs
+```bash
+curl $REPUTATION_SERVICE_URL/profiles/f1
+```
+
+The reputation score should increase after the milestone event is processed.
+
+---
+
+# Useful health checks
+
+```bash
+curl $PARSER_AGENT_URL/health
+curl $REPUTATION_SERVICE_URL/health
+curl $MATCHING_ORCHESTRATOR_URL/health
+curl $CONTRACT_SERVICE_URL/health
+```
+
+---
+
+# Useful Google Cloud commands
+
+List Cloud Run services:
+
+```bash
+gcloud run services list --region $REGION
+```
+
+List Cloud Functions:
+
+```bash
+gcloud functions list --gen2 --region $REGION
+```
+
+List Pub/Sub topics:
+
+```bash
+gcloud pubsub topics list
+```
+
+Read Cloud Run logs:
+
+```bash
+gcloud run services logs read matching-orchestrator --region $REGION --limit 50
+gcloud run services logs read contract-service --region $REGION --limit 50
+```
+
+Read Cloud Function logs:
+
+```bash
+gcloud functions logs read milestone-handler --gen2 --region $REGION --limit 50
+```
+
+---
+
+# Reduce Google Cloud resource usage
+
+Cloud Run normally scales to zero automatically. Run this to make sure all services have zero minimum instances:
+
+```bash
+for SERVICE in parser-agent reputation-service matching-orchestrator contract-service; do
+  gcloud run services update $SERVICE \
+    --region $REGION \
+    --min-instances=0
+done
+```
+
+---
+
+# Delete deployed resources
+
+Use this only if you want to remove the implementation from Google Cloud.
+
+```bash
+gcloud run services delete parser-agent --region $REGION
+gcloud run services delete reputation-service --region $REGION
+gcloud run services delete matching-orchestrator --region $REGION
+gcloud run services delete contract-service --region $REGION
+```
+
+```bash
+gcloud functions delete milestone-handler \
+  --gen2 \
+  --region $REGION
+```
+
+```bash
+gcloud pubsub subscriptions delete milestone-debug-sub
+gcloud pubsub topics delete $MILESTONE_TOPIC
+```
+
+Do not delete Firestore unless you are sure you no longer need the ingested freelancer data.
+
+---
+
+# Implementation summary
+
+This deployment demonstrates:
+
+- RESTful microservices using Cloud Run
+- FaaS using Cloud Functions Gen 2
+- Firestore persistence for freelancer profiles and reputation scores
+- Pub/Sub event-driven communication
+- Orchestration through the matching orchestrator
+- Choreography through milestone completion events
+- End-to-end workflow from job matching to contract milestone completion and reputation update
